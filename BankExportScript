@@ -1,0 +1,188 @@
+library(tidyverse)
+library(RSelenium)
+library(lubridate)
+library(magrittr)
+library(httr)
+library(xml2)
+library(glue)
+library(mailR)
+library(RDCOMClient)
+library(jsonlite)
+
+setwd()
+
+errorDetectedEmail <- function() {
+  # Declare Month for email body
+  message_text <- "There was an error retreiving today's Export.\n\n"
+  # Read Email body html and glue data to it.
+  email_body <- read_file(file.path( "error-email.html")) %>% glue::glue(.open = '~~', .close = '~~') %>% as.character()
+  # Declare email variables
+  from  <- ""
+  to    <- "" 
+  subject <- paste0("Export Error for ",Sys.Date()-1)
+  
+  smtp <- list(host.name = "smtp.office365.com",
+               port = 587,
+               tls = TRUE,
+               ssl = FALSE,
+               user.name = "",
+               passwd = "") 
+               
+  send.mail(from = from,
+            to = to,
+            #cc = cc,
+            subject = subject,
+            body = email_body,
+            smtp = smtp,
+            html = TRUE,
+            authenticate = TRUE,
+            inline = FALSE)
+  
+}
+
+
+#### Login Info ####
+url_signin <- "https://access.jpmorgan.com/jpmalogon?TARGET=$SM$https%3a%2f%2ftssportal.jpmorgan.com%2fpp%2fpp%2fWSQ%2fservlet%2fstarthomepage&brand=jpma"
+un <- ""
+pw <- ""
+
+
+eCaps <- list(
+  chromeOptions = 
+    list(prefs = list(
+      "profile.default_content_settings.popups" = 0L,
+      "download.prompt_for_download" = FALSE,
+      "download.default_directory" = file.path(getwd())
+    )
+    )
+)
+
+
+#### Start Remote Driver ####
+
+remDr <- rsDriver(remoteServerAddr = "localhost", port = 4444L, browser = "chrome", extraCapabilities = eCaps)
+# remDr <- rsDriver(browser = "chrome", port = 4441L, extraCapabilities = eCaps)
+# remDr$client$maxWindowSize(winHand= "current")
+
+
+#### Sign In #####
+remDr$client$navigate(url = url_signin)
+Sys.sleep(5)
+remDr$client$findElement(using = "id", value = "userId")$sendKeysToElement(list(un))
+Sys.sleep(5)
+remDr$client$findElement(using = "id", value = "continueButtonMain")$clickElement()
+Sys.sleep(5)
+remDr$client$findElement(using = "id", value = "sitePhrase")$clickElement()
+remDr$client$findElement(using = "id", value = "password")$sendKeysToElement(list(pw))
+remDr$client$findElement(using = "id", value = "logOnButton")$clickElement()
+Sys.sleep(5)
+remDr$client$findElement(using = "id", value = "eac")$clickElement()
+remDr$client$findElement(using = "id", value = "eac")$sendKeysToElement(list("\uE007"))
+Sys.sleep(30)
+
+
+### Pulling Email Activation Code from Outlook ####
+outlook_app <- COMCreate("Outlook.Application")
+search <- outlook_app$AdvancedSearch(
+      "Inbox",
+  "urn:schemas:httpmail:subject = 'Machine Registration Request'"
+)
+Sys.sleep(8)
+results <- search$Results()
+Sys.sleep(8)
+results$Item(1)$ReceivedTime()
+Sys.sleep(8)
+as.Date("1899-12-30") + floor(results$Item(1)$ReceivedTime())
+Sys.sleep(8)
+for (i in 1:results$Count()) {
+  if (as.Date("1899-12-30") + floor(results$Item(i)$ReceivedTime()) 
+      == Sys.Date()) {
+    email <- results$Item(i)
+  }
+}
+
+body <- email$Body() %>% read_lines()
+code <- body[5] %>% str_extract("\\d+")
+code
+Sys.sleep(8)
+
+
+#### Enter Activation Code #####
+remDr$client$findElement(using = "id", value = "actcode")$sendKeysToElement(list(code))
+Sys.sleep(2)
+remDr$client$findElement(using = "id", value = "pswdx")$sendKeysToElement(list(pw))
+Sys.sleep(2)
+remDr$client$findElement(using = "id", value = "pswdx")$sendKeysToElement(list("\uE007"))
+
+
+### Click CONTINUE if it goes to the Duplicate Logon Page #####
+Sys.sleep(10)
+DuplicateLogonDetected <- remDr$client$getPageSource() %>% str_detect("duplicateLogonDetected")
+DuplicateLogonDetected
+
+if (DuplicateLogonDetected) {
+  remDr$client$findElement(using = "id", value = "continueButton")$clickElement()
+}
+
+#### Main Page #####
+Sys.sleep(20)
+remDr$client$findElement(using = 'id', value = "ember1323")$clickElement()
+Sys.sleep(2)
+remDr$client$findElement(using = "id", value = "ember1362")$clickElement()
+Sys.sleep(2)
+remDr$client$findElement(using = "id", value = "ember1403")$clickElement()
+
+### Click File to Download ###
+Sys.sleep(10)
+remDr$client$findElement(using = "xpath", value = "//*[contains(@id, 'row0grid_inbox')]") $clickElement()
+
+#### Test to see if file has correct date #### 
+Sys.sleep(10)
+
+file <- list.files(getwd()) %>%
+  str_split(., "[\\r\\n]") %>%
+  unlist() %>%
+  data_frame(file = .)%>%
+  filter(file != "", grepl("Baltran", file))
+file
+
+filex <- str_extract(file, "([\\d])+(?![\\d.csv])")
+fileDate <- substr(filex, 1,8)
+fileDate
+
+Date <- Sys.Date()-1
+Date <- gsub("-", "", Date)
+Date
+
+FileTest <- fileDate == Date
+FileTest
+
+if (!FileTest) {
+  errorDetectedEmail()
+}
+
+#### Rename & Move File ####
+file.rename(from = paste0(getwd(),"/",file), to = paste0(getwd(), "/Exports/BankExport_", Sys.Date()-1,".csv"))
+
+remDr$client$close()
+
+
+
+
+
+
+##### SCHEDULE EXPORT 
+
+# setwd()
+# getwd()
+# 
+# 
+# directory_path <- paste0("C:/ScheduledRExports/")
+# 
+# file.copy("", directory_path, overwrite = TRUE)
+# 
+# taskscheduleR::taskscheduler_create(taskname = paste0("R - "),
+#                                     rscript = file.path(directory_path,""),
+#                                     schedule = "DAILY",
+#                                     startdate = format(as.Date("2018-06-24"), "%m/%d/%Y"),
+#                                     starttime = "06:59")
