@@ -1,4 +1,4 @@
-# ChaseWebScrape
+# WebScrape
 Scraping Chase Access website for daily bank statements and deposit activity
 
 - Navigate to URL
